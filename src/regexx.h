@@ -15,8 +15,13 @@ extern "C" {
 
 #include <stdint.h>
 #include <stdio.h>
-#include <stdbool.h>
 #include <limits.h>
+#if defined(_MSC_VER)
+typedef int bool;
+enum {true=1, false=0};
+#else
+#include <stdbool.h>
+#endif
 
 typedef struct regexx_t regexx_t;
 
@@ -26,6 +31,14 @@ enum regexx_flags_t {
     REGEXX_LAZY = 0x00000010,
     REGEXX_IGNORECASE = 0x00000020,
 
+};
+
+struct regexxtoken_t {
+    size_t id;
+    const char *string;
+    size_t length;
+    size_t line_number;
+    size_t line_offset;
 };
 
 /**
@@ -86,13 +99,20 @@ char *regexx_print(regexx_t *re, size_t index, size_t *id, bool is_flag_shown);
 /**
  * Using compiled regex patterns, match an input string.
  */
-size_t regexx_match(regexx_t *re, const char *input, size_t in_length, size_t *out_offset, size_t *out_length);
+size_t regexx_match(regexx_t *re, const char *input, size_t in_offset, size_t in_length, size_t *out_offset, size_t *out_length);
+
 
 /**
  * Retrieve the latest error message. Call this if one of the other functions returns
  * an error.
  */
 const char *regexx_get_error_msg(regexx_t *re);
+
+/**
+ * Search for patterns, but in the style of `lex`, tokenizing an input stream
+ * for things like software language compilers.
+ */
+struct regexxtoken_t regexx_lex_token(const regexx_t *re, const char *subject, size_t *subject_offset, size_t subject_length);
 
 #ifdef __cplusplus
 }

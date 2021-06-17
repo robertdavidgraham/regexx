@@ -21,8 +21,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 #include <stdarg.h>
+
+#ifdef _MSC_VER
+#define snprintf _snprintf
+#define strdup _strdup
+#endif
 
 /** All the possible sub-expresison types.
  * Some are artificial used for internal processing and won't be exposed externally.
@@ -122,18 +126,23 @@ typedef struct regexx_t {
 } regex_t;
 
 
-static void _node_print(node_t *node, buf_t *buf);
+static const char *_node_print(node_t *node, buf_t *buf);
 
 /**
- * for decompiling patterns back into their source, this function appends
- * strings to a buffer
+ * Like `sprintf()`, but appends strings to a buffer. This is used
+ * for two purposes:
+ *  - printing regexp's after they've been parsed, so that the
+ *    user can see how they've been interpretted
+ *  - for formatting error messages when things go wrong.
  */
 static void _appendf(buf_t *buf, const char *fmt, ...) {
     va_list ap;
     int len;
     
     va_start(ap, fmt);
-    len = vsnprintf(buf->string + buf->length, 0, fmt, ap);
+    len = vsnprintf(0, 0, fmt, ap);
+    if (len < 0)
+        fprintf(stderr, "[-] vsnprintf() returned error %s\n", strerror(errno));
     va_end(ap);
     if (len < 0)
         return;
@@ -148,6 +157,7 @@ static void _appendf(buf_t *buf, const char *fmt, ...) {
     
     buf->length += len;
 }
+
 static void _error_msg(regexx_t *re, char *fmt, ...) {
     va_list ap;
     int len;
@@ -182,6 +192,7 @@ static macro_t *_macro_new(struct regexx_t *re, const char *name, const char *va
     macro->value = strdup(value);
     return macro;
 }
+
 static macro_t *_macro_lookup(struct regexx_t *re, const char *name, size_t length) {
     size_t i;
     for (i=0; i<re->macro_count; i++) {
@@ -193,6 +204,7 @@ static macro_t *_macro_lookup(struct regexx_t *re, const char *name, size_t leng
     }
     return NULL;
 }
+
 int regexx_add_macro(regexx_t *re, const char *name, const char *value) {
     size_t i;
     
@@ -226,9 +238,14 @@ static const charclass_t _dot_all = {~0ULL,~0ULL,~0ULL,~0ULL};
 /** Tests if the specified character is in the class */
 static bool _charclass_match_char(const charclass_t *charclass, unsigned c) {
     uint64_t x;
+    uint64_t y;
     c &= 0xFF;
     x = charclass->list[c>>6];
-    return x & (1ULL<<(c&0x3f));
+    c &= 0x3f;
+
+    y = x & (1ULL<<(uint64_t)c);
+
+    return (x & y) != 0ULL;
 }
 
 /** Adds a character to the class */
@@ -840,6 +857,7 @@ static int _parse_next_node(regexx_t *re, const char *pattern, size_t *r_offset,
                             goto fail;
                         }
                     }
+
                     while (prev <= c) {
                         _charclass_add_char(&charclass, prev);
                         prev++;
@@ -849,6 +867,10 @@ static int _parse_next_node(regexx_t *re, const char *pattern, size_t *r_offset,
                     prev = c;
                     _charclass_add_char(&charclass, c);
                 }
+
+
+                node->charclass = charclass;
+
                 c = _next_char(pattern, &offset, length);
             }
             
@@ -958,7 +980,8 @@ static bool _node_eval(node_t *node, const char *text, size_t offset, size_t len
         case T_QUANTIFIER:
             longest = 0;
             
-            /* Do the minimum number of steps */
+            /* Do the minimum number of steps
+             * `offset` will be set to the next character after a successful match */
             for (count=0; count==SIZE_MAX || count<node->quantifier.min; count++) {
                 bool x;
                 x = _node_eval(node->quantifier.child, text, offset, length, &offset);
@@ -966,7 +989,9 @@ static bool _node_eval(node_t *node, const char *text, size_t offset, size_t len
                     return false;
             }
             
-            /* if lazy and rest of chain matches, then stop right here */
+            /* if lazy and rest of chain matches, then stop right here 
+             * `longest` will be set to the last character of a successful match,
+             * which will be used below in case no other matches are found */
             if (_node_eval(node->next, text, offset, length, &longest)) {
                 if (node->quantifier.is_lazy) {
                     *next_offset = longest;
@@ -1032,29 +1057,70 @@ static bool _node_eval(node_t *node, const char *text, size_t offset, size_t len
 }
 
 
+struct regexxtoken_t regexx_lex_token(const regexx_t *re, const char *subject, size_t *subject_offset, size_t subject_length) {
+    struct regexxtoken_t result = {REGEXX_NOT_FOUND, 0, 0 , 0, 0};
+    size_t i;
 
-size_t regexx_match(regexx_t *re, const char *input, size_t length, size_t *out_offset, size_t *out_length) {
-    size_t offset = 0;
     
-    if (length == SIZE_MAX)
-        length = strlen(input);
+    /* Make sure input is valid */
+    if (re == NULL || re->head == NULL || subject == NULL)
+        return result;
+
+    if (subject_length == SIZE_MAX)
+        subject_length = strlen(subject);
+    
+    /* Search for all patterns that have been compile */
+    for (i=0; i<re->pattern_count; i++) {
+        size_t offset;
+        node_t *head = re->patterns[i].head;
+        bool is_matched;
+        size_t end;
+        
+        is_matched = _node_eval(head->next, subject, *subject_offset, subject_length, &end);
+        if (is_matched) {
+            *subject_offset = end;
+            result.id = re->patterns[i].id;
+            result.length = end - *subject_offset;
+            result.line_number = 0;
+            result.line_offset = 0;
+            result.string = subject + *subject_offset;
+            break;
+        }
+    }
+    return result;
+}
+
+size_t regexx_match(regexx_t *re, const char *input, size_t in_offset, size_t in_length, size_t *out_offset, size_t *out_length) {
+    size_t i;
+
+    if (in_length == SIZE_MAX)
+        in_length = strlen(input);
     
     /* Make sure input is valid */
     if (re == NULL || re->head == NULL || input == NULL)
         return -1;
     
-    for (offset=0; offset<length; offset++) {
-        bool is_matched;
-        size_t end;
+    /* Search for all patterns that have been compile */
+    for (i=0; i<re->pattern_count; i++) {
+        size_t offset;
+        node_t *head = re->patterns[i].head;
+        size_t id = re->patterns[i].id;
         
-        is_matched = _node_eval(re->head->next, input, offset, length, &end);
-        if (is_matched) {
-            *out_offset = offset;
-            *out_length = end - offset;
-            return 1; /* todo fix */
+        /* For all bytes, see if there is a match at this location,
+         * until we find one, then stop. */
+        for (offset=in_offset; offset<in_length; offset++) {
+            bool is_matched;
+            size_t end;
+        
+            is_matched = _node_eval(head->next, input, offset, in_length, &end);
+            if (is_matched) {
+                *out_offset = offset;
+                *out_length = end - offset;
+                return id; 
+            }
         }
     }
-    return 0;
+    return REGEXX_NOT_FOUND;
 }
 
 
@@ -1085,11 +1151,15 @@ static void _node_print_chars(const char *str, size_t length, buf_t *buf) {
 /**
  * Recursively print the nodes
  */
-static void _node_print(node_t *node, buf_t *buf) {
+static const char *_node_print(node_t *node, buf_t *buf) {
+    buf_t buf2[1] = {0,0};
+    if (buf == NULL)
+        buf = buf2; /* for debugging */
+
     while (node) {
     switch (node->type) {
         case T_TRUE:
-            return;
+            return buf->string;
             break;
         case T_ROOT:
             break;
@@ -1176,10 +1246,11 @@ static void _node_print(node_t *node, buf_t *buf) {
             break;
         default:
             _appendf(buf, "*****errror*****");
-            return;
+            return buf->string;
     }
         node = node->next;
     }
+    return buf->string;
 }
 
 char *regexx_print(regexx_t *re, size_t index, size_t *id, bool is_flag_shown)
@@ -1197,7 +1268,7 @@ char *regexx_print(regexx_t *re, size_t index, size_t *id, bool is_flag_shown)
             *id = re->patterns[index].id;
     }
     
-    _appendf(buf, "");
+    //_appendf(buf, "");
     
     if (is_flag_shown)
         _appendf(buf, "/");
