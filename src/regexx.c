@@ -1,3 +1,5 @@
+
+#define TEST 1
 /*
     Regexx
  
@@ -22,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <errno.h>
 
 #ifdef _MSC_VER
 #define snprintf _snprintf
@@ -123,6 +126,8 @@ typedef struct regexx_t {
     } *patterns;
     size_t pattern_count;
     
+    size_t line_number;
+    size_t line_offset;
 } regex_t;
 
 
@@ -303,6 +308,20 @@ static unsigned _charclass_count(charclass_t charclass) {
     }
     return result;
 }
+static char _charclass_first_char(charclass_t charclass) {
+    size_t i;
+    for (i=0; i<4; i++) {
+        unsigned char c;
+        uint64_t x = charclass.list[i];
+        if (x == 0ULL)
+            continue;
+        for (c=i*64; c<(i+1)*64; c++) {
+            if (_charclass_match_char(&charclass, c))
+                return (char)c;
+        }
+    }
+    return 0;
+}
 
 static unsigned _letter_run(charclass_t charclass, unsigned letter) {
     unsigned result = 0;
@@ -459,6 +478,14 @@ static int _charclass_from_escseq(const char *pattern, size_t *offset, size_t le
     switch (c) {
         case -1:
             return -1;
+        case 'a':
+            _charclass_add_char(&tmp, '\a');
+            *charclass = tmp;
+            break;
+        case 'b':
+            _charclass_add_char(&tmp, '\b');
+            *charclass = tmp;
+            break;
         case 'n':
             _charclass_add_char(&tmp, '\n');
             *charclass = tmp;
@@ -795,7 +822,7 @@ static int _parse_next_node(regexx_t *re, const char *pattern, size_t *r_offset,
                 goto fail;
             }
             if (_charclass_count(charclass) == 1) {
-                _add_char(re, node, pattern[offset-1]);
+                _add_char(re, node, _charclass_first_char(charclass));
             } else {
                 node->type = T_CHARCLASS;
                 node->charclass = charclass;
@@ -920,6 +947,12 @@ int regexx_add_pattern(regexx_t *re, const char *pattern, size_t id, unsigned fl
     re->patterns[re->pattern_count].head = re->head;
     re->patterns[re->pattern_count].id = id;
     re->pattern_count++;
+    
+    /* Add a new head */
+    re->head = malloc(sizeof(node_t));
+    memset(re->head, 0, sizeof(node_t));
+    re->head->type = T_ROOT;
+    re->tail = re->head;
     return 0;
 fail:
     return -1;
@@ -1056,11 +1089,25 @@ static bool _node_eval(node_t *node, const char *text, size_t offset, size_t len
     return 0;
 }
 
-
-struct regexxtoken_t regexx_lex_token(const regexx_t *re, const char *subject, size_t *subject_offset, size_t subject_length) {
+static void _set_offsets(regexx_t *re, const char *buf, size_t offset, size_t token_length) {
+    size_t i;
+    size_t line_offset = re->line_offset;
+    
+    for (i=0; i<token_length; i++) {
+        if (buf[offset + i] == '\n') {
+            re->line_number = 0;
+            line_offset = 0;
+        } else
+            line_offset++;
+    }
+    re->line_offset = line_offset;
+}
+struct regexxtoken_t regexx_lex_token(regexx_t *re, const char *subject, size_t *subject_offset, size_t subject_length) {
     struct regexxtoken_t result = {REGEXX_NOT_FOUND, 0, 0 , 0, 0};
     size_t i;
-
+    
+    result.line_number = re->line_number;
+    result.line_offset = re->line_offset;
     
     /* Make sure input is valid */
     if (re == NULL || re->head == NULL || subject == NULL)
@@ -1071,19 +1118,17 @@ struct regexxtoken_t regexx_lex_token(const regexx_t *re, const char *subject, s
     
     /* Search for all patterns that have been compile */
     for (i=0; i<re->pattern_count; i++) {
-        size_t offset;
         node_t *head = re->patterns[i].head;
         bool is_matched;
         size_t end;
         
         is_matched = _node_eval(head->next, subject, *subject_offset, subject_length, &end);
         if (is_matched) {
-            *subject_offset = end;
             result.id = re->patterns[i].id;
             result.length = end - *subject_offset;
-            result.line_number = 0;
-            result.line_offset = 0;
+            _set_offsets(re, subject, *subject_offset, result.length);
             result.string = subject + *subject_offset;
+            *subject_offset = end;
             break;
         }
     }

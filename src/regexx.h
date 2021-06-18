@@ -26,6 +26,7 @@ enum {true=1, false=0};
 typedef struct regexx_t regexx_t;
 
 #define REGEXX_NOT_FOUND SIZE_MAX
+#define REGEXX_NOT_FINISHED (SIZE_MAX-1)
 
 enum regexx_flags_t {
     REGEXX_LAZY = 0x00000010,
@@ -33,13 +34,13 @@ enum regexx_flags_t {
 
 };
 
-struct regexxtoken_t {
+typedef struct regexxtoken_t {
     size_t id;
     const char *string;
     size_t length;
     size_t line_number;
     size_t line_offset;
-};
+} regexxtoken_t;
 
 /**
  * Create a regular-expression pattern matcher.
@@ -112,7 +113,13 @@ const char *regexx_get_error_msg(regexx_t *re);
  * Search for patterns, but in the style of `lex`, tokenizing an input stream
  * for things like software language compilers.
  */
-struct regexxtoken_t regexx_lex_token(const regexx_t *re, const char *subject, size_t *subject_offset, size_t subject_length);
+struct regexxtoken_t regexx_lex_token(regexx_t *re, const char *subject, size_t *subject_offset, size_t subject_length);
+
+/**
+ * Restart lexical analysis. this resets the line numbers and temporary bufffer
+ * that holds fragments.
+ */
+void regexx_lex_restart(regexx_t *re);
 
 #ifdef __cplusplus
 }
