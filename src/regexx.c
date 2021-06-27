@@ -78,6 +78,9 @@ typedef struct node_t {
         } alternation;
         struct {
             struct node_t *child;
+            bool is_lookahead:1;
+            bool is_inverted:1;
+            bool is_noncapturing:1;
         } group;
         struct {
             unsigned char length;
@@ -98,6 +101,12 @@ typedef struct buf_t {
     char *string;
     size_t length;
 } buf_t;
+
+typedef struct fileoffsets_t {
+    size_t line_number;
+    size_t char_number;
+    struct fileoffsets_t *next;
+} fileoffsets_t;
 
 typedef struct regexx_t {
     /* For parsing regex patterns: the head of the chain we
@@ -126,10 +135,29 @@ typedef struct regexx_t {
     } *patterns;
     size_t pattern_count;
     
-    size_t line_number;
-    size_t line_offset;
+    fileoffsets_t offsets;
 } regex_t;
 
+void regexx_lex_push(regexx_t *re) {
+    fileoffsets_t *o = malloc(sizeof(*o));
+    o->line_number = re->offsets.line_number;
+    o->char_number = re->offsets.char_number;
+    o->next = re->offsets.next;
+    re->offsets.line_number = 1;
+    re->offsets.char_number = 0;
+    re->offsets.next = 0;
+}
+void regexx_lex_pop(regexx_t *re) {
+    fileoffsets_t *o = re->offsets.next;
+    if (o == NULL) {
+        fprintf(stderr, "[-] regexx_lex_pop: error\n");
+        return;
+    }
+    re->offsets.line_number = o->line_number;
+    re->offsets.char_number = o->char_number;
+    re->offsets.next = o;
+    free(o);
+}
 
 static const char *_node_print(node_t *node, buf_t *buf);
 
@@ -620,7 +648,7 @@ static int _add_quantifier(regex_t *re, size_t offset, node_t *node, size_t min,
     
     /* There must be a previous node that this one refers to */
     if (node->prev == re->head || node->prev == NULL) {
-        _error_msg(re, "%3u: no matching '(' for this ')'", (unsigned)offset);
+        _error_msg(re, "%3u: no previus expression", (unsigned)offset);
         goto fail;
     }
     
@@ -650,7 +678,8 @@ fail:
  *
  * This is the core of what it means to be a **regular** expression, that the language
  * we are parsing goes from left-to-right. We can thus look at the first character
- * of the remainder of the pattern to figure out the next subexpression.
+ * of the remainder of the pattern to figure out the next subexpression will be.
+ * We don't need to backtrack or anything while parsing the language.
  */
 static int _parse_next_node(regexx_t *re, const char *pattern, size_t *r_offset, size_t length) {
     size_t offset = *r_offset;
@@ -763,6 +792,28 @@ static int _parse_next_node(regexx_t *re, const char *pattern, size_t *r_offset,
         } break;
         case '(':
             node->type = T_GROUP_START;
+            if (_peek_char(pattern, &offset, length) == '?') {
+                c = _next_char(pattern, &offset, length);
+                switch (_peek_char(pattern, &offset, length)) {
+                    case '=': /* (?=ABC) positive lookahead */
+                        c = _next_char(pattern, &offset, length);
+                        node->group.is_lookahead = true;
+                        node->group.is_inverted = false;
+                        break;
+                    case '!': /* (?!ABC) negative lookahead */
+                        c = _next_char(pattern, &offset, length);
+                        node->group.is_lookahead = true;
+                        node->group.is_inverted = true;
+                        break;
+                    case '<':
+                        _error_msg(re,  "%3u: capture group feature not supported", offset);
+                        goto fail;
+                    case ':':
+                        c = _next_char(pattern, &offset, length);
+                        node->group.is_noncapturing = true;
+                        break;
+                }
+            }
             break;
         case ')': {
             node_t *start;
@@ -1006,10 +1057,21 @@ static bool _node_eval(node_t *node, const char *text, size_t offset, size_t len
             } else
                 return _node_eval(node->next, text, offset, length, next_offset);
         case T_GROUP:
+            /* Match group.
+             * Also handle "lookaround" */
             if (_node_eval(node->group.child, text, offset, length, &offset2)) {
+                if (node->group.is_inverted)
+                    return false;
+                if (node->group.is_lookahead)
+                    offset2 = offset; /* remove what was matched */
                 return _node_eval(node->next, text, offset2, length, next_offset);
-            } else
-                return false;
+            } else {
+                if (!node->group.is_inverted)
+                    return false;
+                if (node->group.is_lookahead)
+                    offset2 = offset; /* remove what was matched */
+                return _node_eval(node->next, text, offset2, length, next_offset);
+            }
         case T_QUANTIFIER:
             longest = 0;
             
@@ -1089,25 +1151,30 @@ static bool _node_eval(node_t *node, const char *text, size_t offset, size_t len
     return 0;
 }
 
+/**
+ * Keep track of line numbers, and the character offset in the current line, for each
+ * token.
+ * TODO: this needs to be integrated into `lex` parsing instead of a separate step
+ */
 static void _set_offsets(regexx_t *re, const char *buf, size_t offset, size_t token_length) {
     size_t i;
-    size_t line_offset = re->line_offset;
     
     for (i=0; i<token_length; i++) {
         if (buf[offset + i] == '\n') {
-            re->line_number = 0;
-            line_offset = 0;
+            re->offsets.line_number++;
+            re->offsets.char_number = 0;
         } else
-            line_offset++;
+            re->offsets.char_number++;
     }
-    re->line_offset = line_offset;
 }
+
 struct regexxtoken_t regexx_lex_token(regexx_t *re, const char *subject, size_t *subject_offset, size_t subject_length) {
     struct regexxtoken_t result = {REGEXX_NOT_FOUND, 0, 0 , 0, 0};
     size_t i;
+    size_t longest = 0;
     
-    result.line_number = re->line_number;
-    result.line_offset = re->line_offset;
+    result.line_number = re->offsets.line_number;
+    result.char_number = re->offsets.char_number;
     
     /* Make sure input is valid */
     if (re == NULL || re->head == NULL || subject == NULL)
@@ -1123,16 +1190,23 @@ struct regexxtoken_t regexx_lex_token(regexx_t *re, const char *subject, size_t 
         size_t end;
         
         is_matched = _node_eval(head->next, subject, *subject_offset, subject_length, &end);
-        if (is_matched) {
+        if (is_matched && longest < end) {
             result.id = re->patterns[i].id;
             result.length = end - *subject_offset;
             _set_offsets(re, subject, *subject_offset, result.length);
             result.string = subject + *subject_offset;
-            *subject_offset = end;
-            break;
+            longest = end;
         }
     }
-    return result;
+    
+    /* If there was a match, return the longest */
+    if (longest) {
+        *subject_offset = longest;
+        return result;
+    } else {
+        result.id = REGEXX_NOT_FOUND;
+        return result;
+    }
 }
 
 size_t regexx_match(regexx_t *re, const char *input, size_t in_offset, size_t in_length, size_t *out_offset, size_t *out_length) {
@@ -1333,6 +1407,8 @@ regexx_t *regexx_create(unsigned flags) {
     memset(re->head, 0, sizeof(node_t));
     re->head->type = T_ROOT;
     re->tail = re->head;
+    re->offsets.line_number = 1;
+    re->is_dot_match_newline = 1;
     return re;
 }
 

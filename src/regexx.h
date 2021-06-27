@@ -39,7 +39,7 @@ typedef struct regexxtoken_t {
     const char *string;
     size_t length;
     size_t line_number;
-    size_t line_offset;
+    size_t char_number;
 } regexxtoken_t;
 
 /**
@@ -115,11 +115,18 @@ const char *regexx_get_error_msg(regexx_t *re);
  */
 struct regexxtoken_t regexx_lex_token(regexx_t *re, const char *subject, size_t *subject_offset, size_t subject_length);
 
+
+
 /**
- * Restart lexical analysis. this resets the line numbers and temporary bufffer
- * that holds fragments.
+ * Save the current file's parsing context so that we can use this to parse another file.
+ * Namely, call this when processing an #include directive.
  */
-void regexx_lex_restart(regexx_t *re);
+void regexx_lex_push(regexx_t *re);
+
+/**
+ * Restore the previous context that was saved by `regexx_lex_push()`.
+ */
+void regexx_lex_pop(regexx_t *re);
 
 #ifdef __cplusplus
 }
