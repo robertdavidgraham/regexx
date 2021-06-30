@@ -49,17 +49,56 @@ static struct {
     {T_OP, "OPERATOR"},
     {T_WHITESPACE, "\" \""},
     {T_COMMENT, "/* */"},
-    {T_PREPROCESSOR, "#PREPROC"},
     {T_NEWLINE, "\"\\n\""},
-    {T_PRE_DEFINE, "#define"},
-    {T_PRE_INCLUDE, "#include"},
-    {T_PRE_STRINGIZING, "#"},
-    {T_PRE_TOKENPASTING, "##"},
     {T_COMMA, ","},
     {T_PARENS_OPEN, "("},
     {T_PARENS_CLOSE, ")"},
+    {T_ELLIPSES, "..."},
+
+    {T__POUND, "#"},
+    {T__POUNDPOUND, "##"},
+    {T__DEFINE, "define"},
+    {T__DEFINEFUNC, "define"},
+    {T__INCLUDE, "include"},
+    {T__IFDEF, "ifdef"},
+    {T__IFNDEF, "ifndef"},
+    {T__IF, "if"},
+    {T__ELIF, "elif"},
+    {T__ELSE, "else"},
+    {T__ENDIF, "endif"},
+    {T__LINE, "line"},
+    {T__UNDEF, "undef"},
+    {T__ERROR, "error"},
+    {T__WARNING, "warning"},
+    {T__PRAGMA, "pragma"},
+    {T__DEFINED, "defined"},
+
     {0,0}
 };
+
+bool clex_tokens_are_equal(const clextoken_t lhs, clextoken_t rhs) {
+    if (lhs.id != rhs.id)
+        return false;
+    switch (lhs.id) {
+        case T_WHITESPACE:
+        case T_COMMENT:
+            /* all whitespace is the same */
+            return true;
+        default:
+            if (lhs.string.length != rhs.string.length)
+                return false;
+            return memcmp(lhs.string.string, rhs.string.string, rhs.string.length) == 0;
+    }
+}
+const char *clex_tokenid_name(int token_id) {
+    size_t i;
+    for (i=0; token_names[i].name; i++) {
+        if (token_id == token_names[i].id) {
+            return token_names[i].name;
+        }
+    }
+    return "(unknown)";
+}
 const char *clex_token_name(struct clextoken_t token) {
     size_t i;
     for (i=0; token_names[i].name; i++) {
@@ -75,12 +114,13 @@ static struct {
 } clex_exp[] = {
     {T_OP, "\\*"},
 
-    {T_PRE_INCLUDE, "#{WS2}*include{WS2}*\"[^\\n\"]+\""},
-    {T_PRE_INCLUDE, "#{WS2}*include{WS2}*<[^\\n>]+>"},
+    //{T_PRE_INCLUDE, "#{WS2}*include{WS2}*\"[^\\n\"]+\""},
+    //{T_PRE_INCLUDE, "#{WS2}*include{WS2}*<[^\\n>]+>"},
     {T_NEWLINE, "\\n"},
     //{T_WHITESPACE, "{WS2}*\\{WS2}*\n{WS2}*"},
     {T_WHITESPACE, "{WS2}+"},
     {T_WHITESPACE, "{WS2}*({SPLICE}+{WS2}*)+"},
+#if 0
     {T_PRE_DEFINE, "#{WS2}*define"},
     {T_PREPROCESSOR, "#{WS2}*else"},
     {T_PREPROCESSOR, "#{WS2}*endif"},
@@ -91,6 +131,7 @@ static struct {
     {T_PREPROCESSOR, "#{WS2}*line"},
     {T_PREPROCESSOR, "#{WS2}*pragma"},
     {T_PREPROCESSOR, "#{WS2}*undef"},
+#endif
     {T_INTEGER, "{HP}{H}+{IS}?"}, /* hex integer */
     {T_INTEGER, "{NZ}{D}*{IS}?"},
     {T_INTEGER, "0{O}*{IS}?"},             /* octal integer */
@@ -147,7 +188,7 @@ static struct {
     {T_KEYWORD, "_Static_assert"},
     {T_KEYWORD, "_Thread_local"},
     {T_KEYWORD, "__func__"},
-    {T_OP, "\\.\\.\\."},
+    {T_ELLIPSES, "\\.\\.\\."},
     {T_OP, ">>="},
     {T_OP, "<<="},
     {T_OP, "\\+="},
@@ -196,8 +237,8 @@ static struct {
     {T_OP, "^"},
     {T_OP, "\\|"},
     {T_OP, "\\?"},
-    {T_PRE_STRINGIZING, "#"},
-    {T_PRE_TOKENPASTING, "##"},
+    {T__POUND, "#"},
+    {T__POUNDPOUND, "##"},
     {T_IDENTIFIER, "{L}{A}*"}, /* identifier */
     {T_COMMENT, "\\/\\*.*?\\*\\/"}, /* *************************/
     {T_COMMENT, "\\/\\/.*?(?=\\n)"},
@@ -250,15 +291,36 @@ fail:
 clextoken_t clex_next(clex_t *clex, const char *buf, size_t *offset, size_t length) {
     clextoken_t result;
     regexxtoken_t token;
-    
+
+    /* Get the next token */
     token = regexx_lex_token(clex->re, buf, offset, length);
-    
-    result.id = token.id;
-    result.string.string = token.string;
-    result.string.length = token.length;
-    result.line_number = token.line_number;
-    result.char_number = token.char_number;
-    
+
+    /* if found, simply return that token */
+    if (token.id != REGEXX_NOT_FOUND) {
+        result.id = token.id;
+        result.string.string = token.string;
+        result.string.length = token.length;
+        result.line_number = token.line_number;
+        result.char_number = token.char_number;
+        return result;
+    }
+
+    /* Kludge: if end of input, pretend there's a newline at the end of the
+     * file. */
+    if (*offset >= length) {
+        result.id = T_NEWLINE;
+        result.string.string = "\n";
+        result.string.length = 1;
+        return result;
+    }
+
+    /* This is some character that isn't a valid token. We'll get these
+     * when processing `#if 0 ...` sections that are otherwise skipped. */
+    result.id = T__BADCHAR;
+    result.string.string = buf + *offset;
+    result.string.length = 1;
+    (*offset)++;
+
     return result;
 }
 

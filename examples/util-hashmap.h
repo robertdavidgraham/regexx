@@ -47,7 +47,7 @@ typedef struct Hashmap hashmap_t;
  * @param equals function which compares keys for equality
  */
 Hashmap* hashmapCreate(size_t initialCapacity,
-        uint64_t (*hash)(void* key), bool (*equals)(void* keyA, void* keyB));
+        uint64_t (*hash)(const void* key), bool (*equals)(const void* keyA, const void* keyB));
 #define hashmap_create hashmapCreate
 
 /**
@@ -77,13 +77,13 @@ void *hashmapPut(Hashmap* map, void* key, void* value);
  * Gets a value from the map. Returns NULL if no entry for the given key is
  * found or if the value itself is NULL.
  */
-void* hashmapGet(Hashmap* map, void* key);
+void* hashmapGet(const Hashmap* map, const void* key);
 #define hashmap_get hashmapGet
 
 /**
  * Returns true if the map contains an entry for the given key.
  */
-bool hashmapContainsKey(Hashmap* map, void* key);
+bool hashmapContainsKey(const Hashmap* map, const void* key);
 #define hashmap_is_contained_in hashmapContainsKey
 
 /**

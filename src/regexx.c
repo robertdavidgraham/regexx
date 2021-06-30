@@ -499,6 +499,146 @@ void _node_terminate(node_t *node) {
     node->next = terminate;
 }
 
+static unsigned char _hexval(int c) {
+    if ('0' <= c && c <= '9')
+        return c - '0';
+    else if ('a' <= c && c <= 'f') {
+        return c - 'a' + 10;
+    } else if ('A' <= c && c <= 'F') {
+        return c - 'A' + 10;
+    } else
+        return 0xFF;
+}
+
+static int _unicode_from_number(const char *pattern, size_t *offset, size_t length) {
+    unsigned result = 0;
+    int c = _next_char(pattern, offset, length);
+    if (c == '{') {
+        /* We support any number of hex digits until we reach the end `}` */
+        for (;;) {
+            c = _next_char(pattern, offset, length);
+            if (c == '}')
+                return result;
+            c = _hexval(c);
+            if (c > 0xF)
+                return ~0;
+            result <<= 4;
+            result |= c;
+        }
+    } else if (_hexval(c) <= 0xF) {
+        unsigned i;
+        result = _hexval(c);
+        for (i=0; i<3; i++) {
+            c = _next_char(pattern, offset, length);
+            c = _hexval(c);
+            if (c > 0xF)
+                return ~0;
+            result <<= 4;
+            result |= c;
+        }
+        return result;
+    } else
+        return ~0;
+}
+
+static bool _name_is_equal(const char *name, const char *pattern, size_t offset, size_t end_offset) {
+    size_t length;
+
+    /* For code self-documentation purposes, these are are specified as they
+     * appear in regex with the leading and trailing colon */
+    if (name[0] == ':')
+        name++;
+    length = strlen(name);
+    if (length && name[length-1] == ':')
+        length--;
+
+    /* lengths must be the same */
+    if (length != (end_offset - offset))
+        return false;
+
+    /* contents must be the same  */
+    return memcmp(name, pattern + offset, length) == 0;
+}
+
+static int _charclass_add_range(charclass_t *charclass, unsigned first, unsigned last) {
+    while (first <= last) {
+        _charclass_add_char(charclass, first);
+        first++;
+    }
+    return 0;
+}
+
+static int _charclass_from_nameseq(const char *pattern, size_t *offset, size_t length, charclass_t *charclass) {
+    charclass_t tmp = {0,0,0,0};
+    int c;
+    size_t name_offset = *offset;
+
+    /* First, grab the name */
+    for (;;) {
+        c = _next_char(pattern, offset, length);
+        if (!isalpha(c&0xFF))
+            break;
+    }
+
+    /* Name starts and ends with a colon : */
+    if (c != ':')
+        return -1;
+
+    /* Grab the character-class */
+    if (_name_is_equal(":ascii:", pattern, name_offset, *offset)) {
+        /* non-standard extension */
+        _charclass_add_range(&tmp, 0x00, 0x7F);
+    } else if (_name_is_equal(":alnum:", pattern, name_offset, *offset)) {
+        _charclass_add_range(&tmp, 'A', 'Z');
+        _charclass_add_range(&tmp, 'a', 'a');
+        _charclass_add_range(&tmp, '0', '9');
+    } else if (_name_is_equal(":alpha:", pattern, name_offset, *offset)) {
+        _charclass_add_range(&tmp, 'A', 'Z');
+        _charclass_add_range(&tmp, 'a', 'a');
+    } else if (_name_is_equal(":blank:", pattern, name_offset, *offset)) {
+        _charclass_add_char(&tmp, ' ');
+        _charclass_add_char(&tmp, '\t');
+    } else if (_name_is_equal(":cntrl:", pattern, name_offset, *offset)) {
+        _charclass_add_range(&tmp, 0x00, 0x1f);
+        _charclass_add_range(&tmp, 0x7f, 0x7f);
+    } else if (_name_is_equal(":digit:", pattern, name_offset, *offset)) {
+        _charclass_add_range(&tmp, '0', '9');
+    } else if (_name_is_equal(":graph:", pattern, name_offset, *offset)) {
+        _charclass_add_range(&tmp, 0x21, 0x7E);
+    } else if (_name_is_equal(":lower:", pattern, name_offset, *offset)) {
+        _charclass_add_range(&tmp, 'a', 'a');
+    } else if (_name_is_equal(":print:", pattern, name_offset, *offset)) {
+        _charclass_add_range(&tmp, 0x20, 0x7e);
+    } else if (_name_is_equal(":punct:", pattern, name_offset, *offset)) {
+        const char *punct = "[]!\"#$%&'()*+,./:;<=>?@\\^_`{|}~-";
+        size_t i;
+        for (i=0; punct[i]; i++)
+            _charclass_add_char(&tmp, punct[i]);
+    } else if (_name_is_equal(":space:", pattern, name_offset, *offset)) {
+        const char *space = " \t\r\n\v\f";
+        size_t i;
+        for (i=0; space[i]; i++)
+            _charclass_add_char(&tmp, space[i]);
+    } else if (_name_is_equal(":upper:", pattern, name_offset, *offset)) {
+        _charclass_add_range(&tmp, 'A', 'Z');
+    } else if (_name_is_equal(":word:", pattern, name_offset, *offset)) {
+        /* nonstandard */
+        _charclass_add_range(&tmp, 'A', 'Z');
+        _charclass_add_range(&tmp, 'a', 'z');
+        _charclass_add_range(&tmp, '0', '9');
+        _charclass_add_char(&tmp, '_');
+    } else if (_name_is_equal(":xdigit:", pattern, name_offset, *offset)) {
+        _charclass_add_range(&tmp, 'A', 'F');
+        _charclass_add_range(&tmp, 'a', 'f');
+        _charclass_add_range(&tmp, '0', '9');
+    } else {
+        /* unknown named set */
+        return -1;
+    }
+    *charclass = tmp;
+    return 0;
+}
+
 static int _charclass_from_escseq(const char *pattern, size_t *offset, size_t length, charclass_t *charclass) {
     
     charclass_t tmp = {0,0,0,0};
@@ -552,6 +692,62 @@ static int _charclass_from_escseq(const char *pattern, size_t *offset, size_t le
         case 'S':
             *charclass = _invert(_whitespace);
             break;
+        case 'c': { /* control character */
+            int c2 = _peek_char(pattern, offset, length);
+            if ('A' <= c2 && c2 <= 'Z') {
+                c2 = _next_char(pattern, offset, length);
+                _charclass_add_char(&tmp, c2-'A');
+                *charclass = tmp;
+            } else
+                return -1;
+        } break;
+        case 'x': {
+            unsigned n;
+            c = _next_char(pattern, offset, length);
+            if (!isxdigit(c&0xFF))
+                return -1;
+            n = _hexval(c) << 4;
+            c = _next_char(pattern, offset, length);
+            if (!isxdigit(c&0xFF))
+                return -1;
+            n |= _hexval(c);
+            _charclass_add_char(&tmp, n);
+            *charclass = tmp;
+        } break;
+        case '0':
+            if (_hexval(_peek_char(pattern, offset, length)) >= 8) {
+                /* if the next character isn't an octal digit, then
+                 * this is simply the NUL character. Otherwise,
+                 * it's an octal number */
+                c = _next_char(pattern, offset, length);
+                _charclass_add_char(&tmp, c);
+                *charclass = tmp;
+                break;
+            }
+            /* fall through*/
+        case '1':
+        case '2':
+        case '3': {
+            /* first octal digit */
+            unsigned n = c - '0';
+
+            /* second octal digit */
+            c = _next_char(pattern, offset, length);
+            if (_hexval(c) >= 8)
+                return -1;
+            n <<= 3;
+            n |= _hexval(c);
+
+            /* third octal digit */
+            c = _next_char(pattern, offset, length);
+            if (_hexval(c) >= 8)
+                return -1;
+            n <<= 3;
+            n |= _hexval(c);
+
+            _charclass_add_char(&tmp, n);
+            *charclass = tmp;
+        } break;
         default:
             if (ispunct(c)) {
                 _charclass_add_char(&tmp, c);
@@ -863,22 +1059,49 @@ static int _parse_next_node(regexx_t *re, const char *pattern, size_t *r_offset,
             break;
         
         /* Escaped character-classes (\s \w ...): */
-        case '\\': {
-            int err;
-            charclass_t charclass;
-            
-            err = _charclass_from_escseq(pattern, &offset, length, &charclass);
-            if (err == -1) {
-                _error_msg(re, "%3u: bad escape sequence", (unsigned)offset);
-                goto fail;
-            }
-            if (_charclass_count(charclass) == 1) {
-                _add_char(re, node, _charclass_first_char(charclass));
+        case '\\':
+            if (_peek_char(pattern, &offset, length) == 'u') {
+                unsigned uc;
+                
+                /* unicode character */
+                c = _peek_char(pattern, &offset, length);
+                uc = _unicode_from_number(pattern, &offset, length);
+                if (uc == ~0)
+                    return -1;
+                if (uc < 0x00007F) {
+                    _add_char(re, node, uc);
+                } else if (uc < 0x0007FF) {
+                    _add_char(re, node, (uc>>6) | 0xc0);
+                    _add_char(re, node, ((uc>>0) & 0x3F) | 0x80);
+                } else if (uc < 0x00FFFF) {
+                    _add_char(re, node, (uc>>12) | 0xE0);
+                    _add_char(re, node, ((uc>>6) & 0x3F) | 0x80);
+                    _add_char(re, node, ((uc>>0) & 0x3F) | 0x80);
+                } else if (uc < 0x10FFFF) {
+                    _add_char(re, node, (uc >> 18) | 0xF0);
+                    _add_char(re, node, ((uc >>12) & 0x3F) | 0x80);
+                    _add_char(re, node, ((uc >> 6) & 0x3F) | 0x80);
+                    _add_char(re, node, ((uc >> 0) & 0x3F) | 0x80);
+                } else {
+                    return -1;
+                }
             } else {
-                node->type = T_CHARCLASS;
-                node->charclass = charclass;
+                int err;
+                charclass_t charclass;
+                
+                err = _charclass_from_escseq(pattern, &offset, length, &charclass);
+                if (err == -1) {
+                    _error_msg(re, "%3u: bad escape sequence", (unsigned)offset);
+                    goto fail;
+                }
+                if (_charclass_count(charclass) == 1) {
+                    _add_char(re, node, _charclass_first_char(charclass));
+                } else {
+                    node->type = T_CHARCLASS;
+                    node->charclass = charclass;
+                }
             }
-        } break;
+            break;
 
         /* Character class: */
         case '[': {
@@ -936,10 +1159,23 @@ static int _parse_next_node(regexx_t *re, const char *pattern, size_t *r_offset,
                         }
                     }
 
-                    while (prev <= c) {
-                        _charclass_add_char(&charclass, prev);
-                        prev++;
+                    _charclass_add_range(&charclass, prev, c);
+                    prev = -1;
+                } else if (c == '[' && _peek_char(pattern, &offset, length) == ':') {
+                    int err;
+                    charclass_t e;
+                    char c = _peek_char(pattern, &offset, length); /* consume ':' */
+
+                    err = _charclass_from_nameseq(pattern, &offset, length, &e);
+                    if (err == -1) {
+                        _error_msg(re, "%3u: bad character class name", (unsigned)offset);
+                        goto fail;
                     }
+                    c = _next_char(pattern, &offset, length); /* consume ']' */
+                    if (c != ']')
+                        return -1;
+
+                    charclass = _charclass_merge(charclass, e);
                     prev = -1;
                 } else {
                     prev = c;

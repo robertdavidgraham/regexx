@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <stdio.h>
 
 #ifdef _MSC_VER
 #define __inline__ __inline
@@ -84,13 +85,13 @@ struct Entry {
 struct Hashmap {
     Entry** buckets;
     size_t bucketCount;
-    uint64_t (*hash)(void* key);
-    bool (*equals)(void* keyA, void* keyB);
+    uint64_t (*hash)(const void* key);
+    bool (*equals)(const void* keyA, const void* keyB);
     mutex_t lock;
     size_t size;
 };
 Hashmap* hashmapCreate(size_t initialCapacity,
-        uint64_t (*hash)(void* key), bool (*equals)(void* keyA, void* keyB)) {
+        uint64_t (*hash)(const void* key), bool (*equals)(const void* keyA, const void* keyB)) {
     Hashmap* map;
     size_t minimumBucketCount;
 
@@ -126,7 +127,7 @@ Hashmap* hashmapCreate(size_t initialCapacity,
 /**
  * Hashes the given key.
  */
-static inline hash_t _hash_from_key(Hashmap* map, void* key) {
+static inline hash_t _hash_from_key(const Hashmap* map, const void* key) {
     hash_t h = map->hash(key);
     // We apply this secondary hashing discovered by Doug Lea to defend
     // against bad hashes.
@@ -218,8 +219,8 @@ static Entry* _create_entry(void* key, hash_t hash, void* value) {
     entry->next = NULL;
     return entry;
 }
-static inline bool equalKeys(void* keyA, hash_t hashA, void* keyB, hash_t hashB,
-        bool (*equals)(void*, void*)) {
+static inline bool equalKeys(const void* keyA, hash_t hashA, const void* keyB, hash_t hashB,
+        bool (*equals)(const void*, const void*)) {
     if (keyA == keyB) {
         return true;
     }
@@ -255,10 +256,11 @@ void* hashmapPut(Hashmap* map, void* key, void* value) {
         p = &current->next;
     }
 }
-void* hashmapGet(Hashmap* map, void* key) {
+void* hashmapGet(const Hashmap* map, const void* key) {
     hash_t hash = _hash_from_key(map, key);
     size_t index = _index_from_hash(map->bucketCount, hash);
     Entry* entry = map->buckets[index];
+
     while (entry != NULL) {
         if (equalKeys(entry->key, entry->hash, key, hash, map->equals)) {
             return entry->value;
@@ -267,7 +269,7 @@ void* hashmapGet(Hashmap* map, void* key) {
     }
     return NULL;
 }
-bool hashmapContainsKey(Hashmap* map, void* key) {
+bool hashmapContainsKey(const Hashmap* map, const void* key) {
     hash_t hash = _hash_from_key(map, key);
     size_t index = _index_from_hash(map->bucketCount, hash);
     Entry* entry = map->buckets[index];

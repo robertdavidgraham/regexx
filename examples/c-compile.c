@@ -18,7 +18,7 @@ int main(int argc, char *argv[]) {
     
     for (i=1; i<argc; i++) {
         int err;
-        preprocessor_t *pp;
+        translationunit_t *pp;
         pp = preproc_create(argv[i], 0);
         if (pp == NULL) {
             fprintf(stderr, "[-] preprocessor: failed\n");
