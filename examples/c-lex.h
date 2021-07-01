@@ -1,7 +1,7 @@
 #ifndef C_LEX_H
 #define C_LEX_H
 #include <stdint.h>
-#include <stdbool.h>
+#include "util-bool.h"
 
 enum clextokenid_t {
     T_KEYWORD,

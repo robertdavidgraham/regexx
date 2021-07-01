@@ -23,8 +23,8 @@
  #include <stdbool.h>
 #else
  #define bool int
- #define true TRUE
- #define false FALSE
+ #define true 1
+ #define false 0
 #endif
 #else
  #include <stdbool.h>

@@ -1,6 +1,12 @@
 #include "c-preproc.h"
 #include <stdio.h>
+
+#ifdef WIN32
+#include <direct.h>
+#define getcwd _getcwd
+#else
 #include <unistd.h>
+#endif
 
 #
 

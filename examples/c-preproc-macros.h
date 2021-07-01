@@ -2,13 +2,14 @@
 #define C_PREPROC_MACROS_H
 #include "c-lex.h"
 #include "c-preproc-tokens.h"
-#include <stdbool.h>
+#include "util-bool.h"
 
 typedef struct ppmacros_t ppmacros_t;
 typedef struct ppmacro_t {
-    tokenlist_t macro_name;
-    tokenlist_t args;
+    clextoken_t name;
+    tokenlist_t parms;
     tokenlist_t replacement;
+    bool is_function;
 } ppmacro_t;
 
 ppmacros_t *ppmacros_create(void);
@@ -33,7 +34,7 @@ void ppmacros_free(ppmacros_t *pp);
  * @param body
  *  The replacement-list for the macro.
  */
-int ppmacros_add(ppmacros_t *pp, clextoken_t name, bool is_function, tokenlist_t args, tokenlist_t body);
+int ppmacros_add(ppmacros_t *pp, const clextoken_t name, bool is_function, const tokenlist_t args, const tokenlist_t body);
 
 /**
  * This will be valled for every "identifier" token we see in the input, to
@@ -41,6 +42,7 @@ int ppmacros_add(ppmacros_t *pp, clextoken_t name, bool is_function, tokenlist_t
  */
 const ppmacro_t *ppmacros_lookup(const ppmacros_t *pp, const clextoken_t name);
 
+tokenlist_t tokenlist_normalize(tokenlist_t body);
 
 
 #endif

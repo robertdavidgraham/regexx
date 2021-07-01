@@ -1,7 +1,7 @@
 #ifndef C_PREPROC_TOKENS_H
 #define C_PREPROC_TOKENS_H
 #include "c-lex.h"
-#include <stdbool.h>
+#include "util-bool.h"
 
 typedef struct tokenlist_t {
     clextoken_t *list;

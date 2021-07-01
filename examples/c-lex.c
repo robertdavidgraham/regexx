@@ -4,10 +4,14 @@
 #include "c-lex.h"
 #include "../src/regexx.h"
 #include <stdlib.h>
-#include <unistd.h>
 #include <sys/stat.h>
 #include <string.h>
 #include <errno.h>
+
+#ifdef WIN32
+#else
+#include <unistd.h>
+#endif
 
 struct clex_t {
     regexx_t *re;
@@ -99,7 +103,7 @@ const char *clex_tokenid_name(int token_id) {
     }
     return "(unknown)";
 }
-const char *clex_token_name(struct clextoken_t token) {
+const char *clex_token_name(const clextoken_t token) {
     size_t i;
     for (i=0; token_names[i].name; i++) {
         if (token.id == token_names[i].id) {

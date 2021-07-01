@@ -4,7 +4,7 @@
 #include "util-hashmap.h"
 #include "util-siphash24.h"
 #include "util-reallocarray.h"
-#include <stdbool.h>
+#include "util-bool.h"
 #include <string.h>
 
 /**
@@ -14,12 +14,6 @@
 static uint64_t global_entropy[2] = {1,2};
 
 
-typedef struct macro_t {
-    bool is_function;
-    clextoken_t name;
-    tokenlist_t parms;
-    tokenlist_t body;
-} macro_t;
 
 struct ppmacros_t {
     hashmap_t *macros;
@@ -62,7 +56,7 @@ ppmacros_t *ppmacros_create(void) {
     return ppm;
 }
 
-static bool macros_are_equal(macro_t *macro, clextoken_t name, bool is_function, tokenlist_t parms, tokenlist_t body) {
+static bool macros_are_equal(ppmacro_t *macro, clextoken_t name, bool is_function, tokenlist_t parms, tokenlist_t body) {
     size_t i;
     if (!clex_tokens_are_equal(macro->name, name))
         return false;
@@ -77,7 +71,7 @@ static bool macros_are_equal(macro_t *macro, clextoken_t name, bool is_function,
     return true;
 }
 
-static tokenlist_t _normalize_whitespace(tokenlist_t body) {
+tokenlist_t tokenlist_normalize(tokenlist_t body) {
     size_t i;
 
     /* Remove leading and trailing whitespace/comments */
@@ -121,7 +115,7 @@ int ppmacros_add(ppmacros_t *ppm, const clextoken_t name, bool is_function,
                  const tokenlist_t parms, const tokenlist_t in_body)
 {
     tokenlist_t body;
-    macro_t *macro;
+    ppmacro_t *macro;
 
     /*
      * Normalize the whitespace. This reduces all comments or whitespace
@@ -130,7 +124,7 @@ int ppmacros_add(ppmacros_t *ppm, const clextoken_t name, bool is_function,
      * or whitespace between tokens, there is now a single whitespace
      * character.
      */
-    body = _normalize_whitespace(in_body);
+    body = tokenlist_normalize(in_body);
 
     /*
      * Test if the macro already exists. It is no error to have have the
@@ -156,11 +150,11 @@ int ppmacros_add(ppmacros_t *ppm, const clextoken_t name, bool is_function,
     macro->name = name;
     macro->parms.list = duplicatearray(parms.list, parms.count, sizeof(parms.list[0]));
     macro->parms.count = parms.count;
-    macro->body.list = duplicatearray(body.list, body.count, sizeof(body.list[0]));
-    macro->body.count = body.count;
-    
+    macro->replacement.list = duplicatearray(body.list, body.count, sizeof(body.list[0]));
+    macro->replacement.count = body.count;
+
     hashmap_put(ppm->macros, &macro->name.string, macro);
-    
+
     return 0;
 }
 

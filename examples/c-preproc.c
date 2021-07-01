@@ -1,27 +1,3 @@
-// testing \
-more testing \
-more testing
- \
-  \
-  //
- //
-//
-
-// test comment
-/* test'test */
-#define FOOB *
-#ifdef FOO /* test
-test*/
-#warning hello
-/* 
- */ #endif /* test
-test*/
-
-# /*
-
-*/ define foobar 1
-
-
 #include "c-preproc.h"
 #include "c-errors.h"
 #include "c-preproc-tokens.h"
@@ -32,13 +8,22 @@ test*/
 #include <errno.h>
 #include <sys/stat.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <stdarg.h>
 
+#ifdef WIN32
+#define fileno _fileno
+#define strdup _strdup
+#endif
 
+#if defined(_MSC_VER)
+typedef int ssize_t;
+#endif
 
+static bool is_debug = true;
+static bool is_debug_recursion = true;
 
-
+#define _ENTER(name) if (is_debug_recursion) printf("-->%s %u\n", name, depth)
+#define _EXIT(name) if (is_debug_recursion) printf("<--%s %u\n", name, depth)
 
 enum preprocexptype {
     PPT_INCLUDE,
@@ -69,7 +54,7 @@ typedef struct translationunit_t {
     size_t file_count;
 } translationunit_t;
 
-static int preproc_phase3_tokenize(translationunit_t *pp, ppfile_t *file, bool is_if, bool is_else);
+static int preproc_phase3_tokenize(translationunit_t *pp, ppfile_t *file, size_t depth, bool is_if, bool is_else);
 
 
 static void _ppfile_free(ppfile_t *file) {
@@ -134,7 +119,7 @@ static ppfile_t _ppfile_create(const  char *filename) {
     if (buf == NULL)
         abort();
     bytes_read = fread(buf, 1, length, fp);
-    if (bytes_read < 0 || bytes_read < length) {
+    if (bytes_read < 0 || bytes_read < (signed)length) {
         free(buf);
         return file;
     }
@@ -205,8 +190,26 @@ translationunit_t *preproc_create(const char *filename, struct clex_t *clex) {
 };
 
 
+static void _debug(const clextoken_t token) {
+        switch (token.id) {
+        case T_COMMENT: 
+            printf("{/**/}");
+            break;
+        case T_WHITESPACE: printf("{ }"); break;
+        case T_NEWLINE: 
+            printf("{\\n %u}\n", (unsigned)token.line_number); 
+            break;
+        default:
+            printf("{%.*s}", (unsigned)token.string.length, token.string.string);
+        }
+}
 static clextoken_t _next(translationunit_t *pp, ppfile_t *file) {
-    return clex_next(pp->clex, file->buf, &file->offset, file->length);
+    if (is_debug) {
+        clextoken_t token = clex_next(pp->clex, file->buf, &file->offset, file->length);
+        _debug(token);
+        return token;
+    } else
+        return clex_next(pp->clex, file->buf, &file->offset, file->length);
 }
 
 /**
@@ -214,12 +217,12 @@ static clextoken_t _next(translationunit_t *pp, ppfile_t *file) {
  * until the next token. It does add these to the tokenized
  * list, though, because subsequent phases might want to see them.
  */
-clextoken_t _trim(translationunit_t *pp, ppfile_t *file) {
-    clextoken_t token;
-    do {
-        token = _next(pp, file);
+clextoken_t _trimadd(translationunit_t *pp, ppfile_t *file) {
+    clextoken_t token = _next(pp, file);
+    while (token.id == T_WHITESPACE || token.id == T_COMMENT) {
         tokenlist_add(&pp->tokens, token);
-    } while (token.id == T_WHITESPACE || token.id == T_COMMENT);
+        token = _next(pp, file);
+    } 
     return token;
 }
 
@@ -250,13 +253,14 @@ static int ERROR(const ppfile_t *file, const clextoken_t token, const char *fmt,
     va_end(args);
     return -1;
 }
-static void ERR_UNEXPECTED(ppfile_t *file, clextoken_t token, int id_expected) {
+static int ERR_UNEXPECTED(ppfile_t *file, clextoken_t token, int id_expected) {
     fprintf(stderr, "[-] %s:%u:%u: unexpected '%s', was expecting '%s'\n",
             file->filename,
             (unsigned)token.line_number,
             (unsigned)token.char_number,
             clex_token_name(token),
             clex_tokenid_name(id_expected));
+    return -1;
 }
 
 static int _get_pp_directive(clextoken_t token) {
@@ -298,7 +302,7 @@ static int _get_pp_directive(clextoken_t token) {
  * Handle what happens when we need to skip content due to a failed
  * `#if`/`#ifdef`/`#elif` condition.
  */
-static int _process_SKIP(translationunit_t *pp, ppfile_t *file, bool is_inside_else, size_t depth) {
+static int _process_SKIP(translationunit_t *pp, ppfile_t *file, size_t depth, bool is_inside_else, bool is_everything) {
     int err;
     bool has_seen_else = is_inside_else;
 
@@ -314,6 +318,8 @@ static int _process_SKIP(translationunit_t *pp, ppfile_t *file, bool is_inside_e
 
         /* If the first non-space token is not the # preprocessor
          * directive, then simply skip tokens until end-of-line */
+        if (token.id == T_NEWLINE)
+            continue;
         if (token.id != T__POUND) {
             do {
                 token = _next(pp, file);
@@ -365,7 +371,9 @@ static int _process_SKIP(translationunit_t *pp, ppfile_t *file, bool is_inside_e
             case T__IFNDEF:
                 /* We need to skip these recursively, as if this expression
                  * failed. First we need to process till the end-of-line */
-                err = _process_SKIP(pp, file, false, depth+1);
+                _ENTER("skip");
+                err = _process_SKIP(pp, file, depth+1, false, true);
+                _EXIT("skip");
                 if (err) {
                     ERROR(file, directive, "failed define");
                     goto fail;
@@ -378,7 +386,7 @@ static int _process_SKIP(translationunit_t *pp, ppfile_t *file, bool is_inside_e
                     ERROR(file, directive, "#else after #else");
                     goto fail;
                 }
-                if (depth == 0) {
+                if (!is_everything) {
                     return C_NORM_ELSE;
                 } else {
                     /* We are recursively inside a skipped section, so
@@ -435,7 +443,7 @@ static int _process_WARNING(translationunit_t *pp, ppfile_t *file, const clextok
  * Handle the `#ifdef` direct. This includes evaluating the defined
  * macro, as well as skipping to the `#else` or `#elif` statements.
  */
-static int _process_IFDEF(translationunit_t *pp, ppfile_t *file, bool is_inverted) {
+static int _process_IFDEF(translationunit_t *pp, ppfile_t *file, size_t depth, bool is_inverted) {
     clextoken_t token;
     const ppmacro_t *macro;
     bool is_found;
@@ -445,7 +453,7 @@ static int _process_IFDEF(translationunit_t *pp, ppfile_t *file, bool is_inverte
     /*
      * Get the first non-whitespace token, which should be the identifier.
      */
-    token = _trim(pp, file);
+    token = _trimskip(pp, file);
     if (token.id != T_IDENTIFIER && token.id != T_KEYWORD) {
         ERROR(file, token, "macro name missing");
         return -1;
@@ -464,20 +472,138 @@ static int _process_IFDEF(translationunit_t *pp, ppfile_t *file, bool is_inverte
      * Now continue processing from here
      */
     if (is_found) {
-        err = preproc_phase3_tokenize(pp, file, true, false);
+        _ENTER("parse");
+        err = preproc_phase3_tokenize(pp, file, depth+1, true, false);
+        _EXIT("parse");
         if (err == C_NORM_ELSE) {
-            err = _process_SKIP(pp, file, true, 0);
+            _ENTER("skip");
+            err = _process_SKIP(pp, file, depth+1, true, false);
+            _EXIT("skip");
         } else if (err)
             return err;
     } else {
-        err = _process_SKIP(pp, file, false, 0);
+        _ENTER("skip");
+        err = _process_SKIP(pp, file, depth+1, false, false);
+        _EXIT("skip");
         if (err == C_NORM_ELSE) {
-            err = preproc_phase3_tokenize(pp, file, false, true);
+            _ENTER("parse");
+            err = preproc_phase3_tokenize(pp, file, depth+1, false, true);
+            _EXIT("parse");
         } else if (err)
             return err;
     }
 
     return err;
+}
+
+static int _process_ARGS(translationunit_t *pp, ppfile_t *file, tokenlist_t *parms) {
+    clextoken_t token;
+    
+    /* Get rid of any whitespace in the argument list */
+    token = _trimskip(pp, file);
+
+    for (;;) {
+        /* if the ellipses (for variable arguments) exists
+         * in the list, then it must be at the end.
+         * Therefore, check for ending ')' immediately after */
+        if (token.id == T_ELLIPSES) {
+            tokenlist_add(parms, token);
+            token = _trimskip(pp, file);
+            if (token.id != T_PARENS_CLOSE)
+                return ERR_UNEXPECTED(file, token, T_PARENS_CLOSE);
+            break;
+        }
+
+        /* Add the token to our argument list  */
+        if (token.id == T_IDENTIFIER || token.id == T_KEYWORD) {
+            if (tokenlist_has_identifier(parms, token))
+                return ERROR(file, token, "duplicate macro arg");
+            tokenlist_add(parms, token);
+            token = _trimskip(pp, file);
+        } else if (token.id == T_COMMA || token.id == T_PARENS_CLOSE) {
+            clextoken_t clone;
+
+            /* We have an empty argument, in which case,
+             * we need to add that. We need to clone this
+             * token (for filename/line-number/char-number)
+             * but make it an empty token */
+            clone = token;
+            clone.id = T_WHITESPACE;
+            clone.string.length = 0;
+            tokenlist_add(parms, clone);
+        }
+
+        /* We've either come to the end of our list or
+         * see a comma `,` meaning we need to loop around again */
+        if (token.id == T_NEWLINE) {
+            return ERR_UNEXPECTED(file, token, T_PARENS_CLOSE);
+        }
+        if (token.id == T_PARENS_CLOSE) {
+            break;
+        }
+        if (token.id != T_COMMA) {
+            return ERR_UNEXPECTED(file, token, T_PARENS_CLOSE);
+        }
+
+        token = _trimskip(pp, file);
+    }
+
+    return 0;
+}
+
+static int _process_PARMS(translationunit_t *pp, ppfile_t *file, tokenlist_t *parms) {
+    clextoken_t token;
+    
+    /* Get rid of any whitespace in the argument list */
+    token = _trimskip(pp, file);
+
+    for (;;) {
+        /* if the ellipses (for variable arguments) exists
+         * in the list, then it must be at the end.
+         * Therefore, check for ending ')' immediately after */
+        if (token.id == T_ELLIPSES) {
+            tokenlist_add(parms, token);
+            token = _trimskip(pp, file);
+            if (token.id != T_PARENS_CLOSE)
+                return ERR_UNEXPECTED(file, token, T_PARENS_CLOSE);
+            break;
+        }
+
+        /* Add the token to our argument list  */
+        if (token.id == T_IDENTIFIER || token.id == T_KEYWORD) {
+            if (tokenlist_has_identifier(parms, token))
+                return ERROR(file, token, "duplicate macro arg");
+            tokenlist_add(parms, token);
+            token = _trimskip(pp, file);
+        } else if (token.id == T_COMMA || token.id == T_PARENS_CLOSE) {
+            clextoken_t clone;
+
+            /* We have an empty argument, in which case,
+             * we need to add that. We need to clone this
+             * token (for filename/line-number/char-number)
+             * but make it an empty token */
+            clone = token;
+            clone.id = T_WHITESPACE;
+            clone.string.length = 0;
+            tokenlist_add(parms, clone);
+        }
+
+        /* We've either come to the end of our list or
+         * see a comma `,` meaning we need to loop around again */
+        if (token.id == T_NEWLINE) {
+            return ERR_UNEXPECTED(file, token, T_PARENS_CLOSE);
+        }
+        if (token.id == T_PARENS_CLOSE) {
+            break;
+        }
+        if (token.id != T_COMMA) {
+            return ERR_UNEXPECTED(file, token, T_PARENS_CLOSE);
+        }
+
+        token = _trimskip(pp, file);
+    }
+
+    return 0;
 }
 
 /**
@@ -499,7 +625,7 @@ static int _process_DEFINE(translationunit_t *pp, ppfile_t *file) {
      * Remove any trailing whitespace or comments after the
      * "#define" keyword
      */
-    token = _trim(pp, file);
+    token = _trimskip(pp, file);
     if (token.id != T_IDENTIFIER && token.id != T_KEYWORD) {
         ERROR(file, token, "macro name missing");
         return -1;
@@ -527,56 +653,9 @@ static int _process_DEFINE(translationunit_t *pp, ppfile_t *file) {
     if (token.id == T_PARENS_OPEN) {
         is_function = true;
 
-        /* Get rid of any whitespace in the argument list */
-        token = _trim(pp, file);
-
-        for (;;) {
-            /* if the ellipses (for variable arguments) exists
-             * in the list, then it must be at the end.
-             * Therefore, check for ending ')' immediately after */
-            if (token.id == T_ELLIPSES) {
-                tokenlist_add(&parms, token);
-                token = _trim(pp, file);
-                if (token.id != T_PARENS_CLOSE) {
-                    ERR_UNEXPECTED(file, token, T_PARENS_CLOSE);
-                    goto fail;
-                }
-                break;
-            }
-
-            /* Add the token to our argument list  */
-            if (token.id == T_IDENTIFIER) {
-                if (tokenlist_has_identifier(&parms, token)) {
-                    ERROR(file, token, "duplicate macro arg");
-                }
-                tokenlist_add(&parms, token);
-                token = _trim(pp, file);
-            } else if (token.id == T_COMMA || token.id == T_PARENS_CLOSE) {
-                clextoken_t clone;
-
-                /* We have an empty argument, in which case,
-                 * we need to add that. We need to clone this
-                 * token (for filename/line-number/char-number)
-                 * but make it an empty token */
-                clone = token;
-                clone.id = T_WHITESPACE;
-                clone.string.length = 0;
-                tokenlist_add(&parms, clone);
-            }
-
-            /* We've either come to the end of our list or
-             * see a comma `,` meaning we need to loop around again */
-            if (token.id == T_NEWLINE) {
-                ERR_UNEXPECTED(file, token, T_PARENS_CLOSE);
-                goto fail;
-            }
-            if (token.id == T_PARENS_CLOSE)
-                break;
-            if (token.id != T_COMMA) {
-                ERR_UNEXPECTED(file, token, T_PARENS_CLOSE);
-                goto fail;
-            }
-        }
+        err = _process_PARMS(pp, file, &parms);
+        if (err)
+            goto fail;
 
         token = _next(pp, file);
     }
@@ -588,7 +667,8 @@ static int _process_DEFINE(translationunit_t *pp, ppfile_t *file) {
      * Now add the replacement-list of the token
      */
     while (token.id != T_NEWLINE) {
-        tokenlist_add(&body, _next(pp,file));
+        tokenlist_add(&body, token);
+        token = _next(pp, file);
     }
 
     /*
@@ -601,9 +681,45 @@ static int _process_DEFINE(translationunit_t *pp, ppfile_t *file) {
         ERROR(file, identifier, "duplicate macro definition");
         goto fail;
     }
+
+    /* We made a copy of these when we inserted into the hash table */
+    free(parms.list);
+    free(body.list);
     return 0;
 fail:
+    free(parms.list);
+    free(body.list);
     return err;
+}
+
+/**
+ * Add 'preprocessor-tokens' as normal tokens. This may require macro
+ * replacement.
+ */
+static int preproc_add_token(translationunit_t *pp, ppfile_t *file, clextoken_t token) {
+    if (token.id == T_IDENTIFIER || token.id == T_KEYWORD) {
+        const ppmacro_t *macro = ppmacros_lookup(pp->macros, token);
+        if (macro && macro->is_function) {
+            tokenlist_t args = {0,0};
+            int err;
+            size_t arg_count;
+            err = _process_PARMS(pp, file, &args);
+            if (err) {
+                ERROR(file, token, "failed to read macro arguments");
+                return err;
+            }
+            arg_count = args.count;
+            if (arg_count && args.list[arg_count-1].id == T_ELLIPSES) {
+
+            }
+            return 0;
+        } else if (macro) {
+            return 0;
+        }
+    }
+
+    tokenlist_add(&pp->tokens, token);
+    return 0;
 }
 
 /**
@@ -613,7 +729,7 @@ fail:
  *  Are we inside an `#if` block? If so, we need to terminate once
  *  we get an `#endif`.
  */
-static int preproc_phase3_tokenize(translationunit_t *pp, ppfile_t *file, bool is_if, bool is_else) {
+static int preproc_phase3_tokenize(translationunit_t *pp, ppfile_t *file, size_t depth, bool is_if, bool is_else) {
     int err;
 
     /*
@@ -625,26 +741,23 @@ static int preproc_phase3_tokenize(translationunit_t *pp, ppfile_t *file, bool i
         clextoken_t directive;
 
         /* Strip whitespace from start of line */
-        token = _trim(pp, file);
+        token = _trimadd(pp, file);
         if (token.id == T_NEWLINE) {
-            tokenlist_add(&pp->tokens, token);
+            preproc_add_token(pp, file, token);
             continue;
         }
 
         /* If the first non-space token is not the # preprocessor
-         * directive, then simply skip tokens until end-of-line */
+         * directive, then process skip tokens until end-of-line */
         if (token.id != T__POUND) {
+            preproc_add_token(pp, file, token);
             do {
                 token = _next(pp, file);
-                tokenlist_add(&pp->tokens, token);
+                preproc_add_token(pp, file, token);
             } while (token.id != T_NEWLINE);
             continue;
         }
 
-        /* Kludge: Remove the "pound" token. We added it to our tokenized
-         * list above, but we don't want preprocessor tokens in the final
-         * list. */
-        pp->tokens.count--;
 
         /* Trim any comments and space betwee `#` and `define`.
          * These aren't recorded in the tokenization */
@@ -652,7 +765,7 @@ static int preproc_phase3_tokenize(translationunit_t *pp, ppfile_t *file, bool i
 
         /* This could be a naked `#` on a line */
         if (token.id == T_NEWLINE) {
-            tokenlist_add(&pp->tokens, token);
+            //tokenlist_add(&pp->tokens, token);
             continue;
         }
 
@@ -675,14 +788,18 @@ static int preproc_phase3_tokenize(translationunit_t *pp, ppfile_t *file, bool i
                 }
                 break;
             case T__IFDEF:
-                err = _process_IFDEF(pp, file, false);
+                _ENTER("ifdef");
+                err = _process_IFDEF(pp, file, depth+1, false);
+                _EXIT("ifdef");
                 if (err) {
                     ERROR(file, token, "failed #if");
                     goto fail;
                 }
                 break;
             case T__IFNDEF:
-                err = _process_IFDEF(pp, file, true);
+                _ENTER("ifndef");
+                err = _process_IFDEF(pp, file, depth+1, true);
+                _EXIT("ifndef");
                 if (err) {
                     ERROR(file, token, "failed #if");
                     goto fail;
@@ -690,15 +807,7 @@ static int preproc_phase3_tokenize(translationunit_t *pp, ppfile_t *file, bool i
                 break;
             case T__ELSE:
                 if (is_if && !is_else) {
-                    /* We are at the end if `#if` processing, so
-                     * we need to skip the remainder */
-                    err = _process_SKIP(pp, file, true, 1);
-                    if (err)
-                        goto fail;
-                    token = _trimskip(pp, file);
-                    if (token.id != T_NEWLINE)
-                        return ERROR(file, token, "extra tokens after preprocessor directive");
-                    return 0;
+                    return C_NORM_ELSE;
                 } else if (is_else) {
                     return ERROR(file, directive, "#else in #else");
                 } else {
@@ -712,7 +821,7 @@ static int preproc_phase3_tokenize(translationunit_t *pp, ppfile_t *file, bool i
                         return ERROR(file, token, "extra tokens after preprocessor directive");
                     return 0;
                 } else {
-                    return ERROR(file, directive, "#else without #if");
+                    return ERROR(file, directive, "#endif without #if");
                 }
                 break;
             case T__WARNING:
@@ -806,7 +915,7 @@ int preproc_parse(translationunit_t *pp) {
     if (err)
         return err;
     
-    err = preproc_phase3_tokenize(pp, &pp->files[0], false, false);
+    err = preproc_phase3_tokenize(pp, &pp->files[0], 0, false, false);
     if (err)
         return err;
     

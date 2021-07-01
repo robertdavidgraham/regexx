@@ -18,7 +18,8 @@ extern "C" {
 #include <limits.h>
 #if defined(_MSC_VER)
 typedef int bool;
-enum {true=1, false=0};
+#define true 1
+#define false 0
 #else
 #include <stdbool.h>
 #endif
